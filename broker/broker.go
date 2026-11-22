@@ -86,9 +86,10 @@ func Do(ctx context.Context, socket string, c Call) (Reply, error) {
 // Socket — сокет команд этапа в своём временном каталоге. Каталог открывают на чтение только песочнице этого
 // этапа: агент не зовёт команды через сокет соседнего этапа от его имени.
 type Socket struct {
-	Path string // путь к сокету: drivers.Args.Socket
-	dir  string
-	srv  *http.Server
+	Path   string // путь к сокету: drivers.Args.Socket
+	dir    string
+	srv    *http.Server
+	cancel context.CancelFunc // отменяет контекст обработчиков
 }
 
 // Listen обслуживает вызовы этапа на новом сокете, пока не вызван Close. Вызов, argv которого не начинается словами
@@ -104,30 +105,41 @@ func Listen(allow []string, handle func(context.Context, Call) Reply) (*Socket, 
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("сокет команд %s: %w", s.Path, err), os.RemoveAll(dir))
 	}
-	s.srv = &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var c Call
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&c); err != nil || len(c.Argv) == 0 {
-			http.Error(w, "нужен JSON {argv, cwd}", http.StatusBadRequest)
-			return
-		}
-		reply := Reply{Stderr: fmt.Sprintf("команда %q этапу не разрешена\n", strings.Join(c.Argv, " ")), Exit: 2}
-		if allowed(allow, c.Argv) {
-			reply = handle(r.Context(), c)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(reply)
-	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.srv = &http.Server{ReadHeaderTimeout: 10 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx },
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var c Call
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&c); err != nil || len(c.Argv) == 0 {
+				http.Error(w, "нужен JSON {argv, cwd}", http.StatusBadRequest)
+				return
+			}
+			reply := Reply{Stderr: fmt.Sprintf("команда %q этапу не разрешена\n", strings.Join(c.Argv, " ")), Exit: 2}
+			if allowed(allow, c.Argv) {
+				reply = handle(r.Context(), c)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(reply)
+		})}
 	// Сбой листенера агент увидит отказом вызова.
 	go func() { _ = s.srv.Serve(l) }()
 	return s, nil
 }
 
-// Close останавливает сокет и удаляет его каталог.
+// closeGrace — сколько Close ждёт вызовы в работе.
+const closeGrace = 5 * time.Second
+
+// Close останавливает сокет и удаляет его каталог. Вызовам в работе даётся closeGrace; потом их соединения
+// закрываются, контекст обработчиков отменяется, а Close возвращает ошибку.
 func (s *Socket) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), closeGrace)
 	defer cancel()
-	_ = s.srv.Shutdown(ctx)
-	return os.RemoveAll(s.dir)
+	err := s.srv.Shutdown(ctx)
+	s.cancel()
+	if err != nil {
+		err = errors.Join(fmt.Errorf("вызовы команд не завершились за %s: %w", closeGrace, err), s.srv.Close())
+	}
+	return errors.Join(err, os.RemoveAll(s.dir))
 }
 
 // allowed — argv начинается словами одного из непустых префиксов allow.

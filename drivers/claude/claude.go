@@ -2,8 +2,10 @@
 package claude
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,7 +15,6 @@ import (
 	"github.com/hakastein/smith/agent"
 	"github.com/hakastein/smith/drivers"
 	"github.com/hakastein/smith/internal/launch"
-	"github.com/hakastein/smith/logx"
 )
 
 // Claude Code — бинарник `claude` из PATH, пока Settings.Bin не задал иной.
@@ -135,7 +136,7 @@ func New(settings drivers.Settings, setup drivers.Setup) (*Driver, error) {
 			}
 		}
 	}
-	logx.Logf("драйвер claude: %s, CLAUDE_CONFIG_DIR=%s", settings.Bin, configDir)
+	cmp.Or(setup.Logger, slog.Default()).Info("драйвер готов", "driver", "claude", "bin", settings.Bin, "config_dir", configDir)
 	env := setup.Environ(settings, claudeAuth)
 	env = append(env,
 		// Потолок ожидания фоновых задач снят: верхняя граница и так есть — таймаут запуска.
@@ -166,7 +167,7 @@ func (c *Driver) Run(ctx context.Context, a drivers.Args, t *agent.Telemetry) (*
 	if a.SessionDir != "" && tally.SessionID != "" {
 		// Без журнала сессии запуск не хуже: сбой сохранения его не роняет.
 		if o.Resume, err = c.keepSession(a, tally.SessionID); err != nil {
-			t.Logf("журнал сессии не сохранён (%s)", err)
+			t.Logger().Warn("журнал сессии не сохранён", "err", err)
 		}
 	}
 	return o, nil
@@ -197,7 +198,7 @@ func (c *Driver) command(a drivers.Args) (agent.Command, error) {
 	}
 	allowed := allowedTools
 	var addDirs []string
-	if a.Sandbox != nil {
+	if !a.Sandbox.ReadOnlyCLI {
 		// Голые Read, Grep и Glob открыли бы чтение любого пути: без них Claude Code читает только
 		// рабочий каталог и --add-dir. Команды закрывает песочница ОС (bubblewrap и socat), а без
 		// неё запуск не стартует.

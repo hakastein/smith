@@ -16,7 +16,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/hakastein/smith/logx"
 	"golang.org/x/sys/unix"
 )
 
@@ -111,7 +110,7 @@ func Start(ctx context.Context, c Command, t *Telemetry) *Process {
 	} else {
 		p.ctx, p.cancel = context.WithCancel(ctx)
 	}
-	logx.Logf("этап «%s» запускается: %s %s", t.name, c.Path, strings.Join(c.Argv, " "))
+	t.log.Info("этап запускается", "cmd", c.Path+" "+strings.Join(c.Argv, " "))
 	path, err := lookPath(c.Path, c.Env)
 	p.cmd = exec.CommandContext(p.ctx, path, c.Argv...)
 	// Путь уже найден в PATH запуска, а не в окружении своего процесса.

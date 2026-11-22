@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"cmp"
+	"context"
 	"fmt"
+	"log/slog"
+	"slices"
 	"sync"
 	"time"
-
-	"github.com/hakastein/smith/logx"
 )
 
 const silenceReport = 30 * time.Second
@@ -24,13 +26,13 @@ type Stream interface {
 // Telemetry — лог и поток этапа по его событиям, статистика и итог в лог.
 type Telemetry struct {
 	mu         sync.Mutex
-	name       string
+	log        *slog.Logger
 	cwd        string
 	skills     []string
 	commands   []string
 	stream     Stream
 	events     []*Event
-	lastShown  string
+	lastShown  []line
 	heartbeat  *time.Ticker
 	stop       chan struct{}
 	responding chan struct{}
@@ -39,17 +41,18 @@ type Telemetry struct {
 }
 
 // NewTelemetry — телеметрия этапа name. commands и skills — команды и скиллы метода этапа: статистика называет
-// их и тогда, когда агент к ним не обращался. Телеметрию закрывает Close или Finish, когда этап закончен.
-func NewTelemetry(name string, commands, skills []string, cwd string, stream Stream) *Telemetry {
-	t := &Telemetry{name: name, cwd: cwd, skills: skills, commands: commands, stream: stream, responding: make(chan struct{}),
-		traffic: newTraffic(), stop: make(chan struct{})}
+// их и тогда, когда агент к ним не обращался. Записи лога этапа идут в log (nil — slog.Default()) с атрибутом
+// stage. Телеметрию закрывает Close или Finish, когда этап закончен.
+func NewTelemetry(name string, commands, skills []string, cwd string, stream Stream, log *slog.Logger) *Telemetry {
+	t := &Telemetry{log: cmp.Or(log, slog.Default()).With("stage", name), cwd: cwd, skills: skills, commands: commands,
+		stream: stream, responding: make(chan struct{}), traffic: newTraffic(), stop: make(chan struct{})}
 	startedAt := time.Now()
 	t.heartbeat = time.NewTicker(silenceReport)
 	go func(ticker *time.Ticker, stop chan struct{}) {
 		for {
 			select {
 			case <-ticker.C:
-				t.Logf("%sс без единого события — %s", seconds(time.Since(startedAt).Milliseconds()), t.traffic.Describe())
+				t.log.Info("этап молчит", "silence", time.Since(startedAt).Round(time.Second), "traffic", t.traffic.Describe())
 			case <-stop:
 				return
 			}
@@ -58,10 +61,8 @@ func NewTelemetry(name string, commands, skills []string, cwd string, stream Str
 	return t
 }
 
-// Logf пишет в лог строку об этапе.
-func (t *Telemetry) Logf(format string, args ...any) {
-	logx.Logf("этап «%s»: %s", t.name, fmt.Sprintf(format, args...))
-}
+// Logger — лог этапа: записи о нём несут его атрибут stage.
+func (t *Telemetry) Logger() *slog.Logger { return t.log }
 
 func (t *Telemetry) stopHeartbeat() {
 	if t.heartbeat != nil {
@@ -101,13 +102,14 @@ func (t *Telemetry) record(event *Event) {
 	t.stopHeartbeat()
 	t.stream.Write(event)
 	t.events = append(t.events, event)
-	// Лог раскрашен всегда, и вне терминала.
-	shown, ok := formatEvent(event, true, t.cwd, t.name)
-	if !ok || shown == "" || shown == t.lastShown {
+	lines := eventLines(event, t.cwd)
+	if len(lines) == 0 || slices.Equal(lines, t.lastShown) {
 		return
 	}
-	t.lastShown = shown
-	logx.Stamped(shown)
+	t.lastShown = lines
+	for _, l := range lines {
+		t.log.LogAttrs(context.Background(), l.level(), l.text, l.attrs()...)
+	}
 }
 
 // Responding закрывается, когда модель начала отвечать этапу, — с этого момента кэш промпта, записанный его
@@ -128,28 +130,22 @@ func (t *Telemetry) Close() {
 // Finish — этап закончен исходом o: статистика и итог в лог.
 func (t *Telemetry) Finish(o *Outcome) {
 	t.Close()
-	for _, line := range statsFrom(t.events, t.cwd, t.skills, t.commands).Lines() {
-		logx.Logf("[%s] %s", t.name, line)
-	}
-	outcome := "завершён"
+	t.log.LogAttrs(context.Background(), slog.LevelInfo, "статистика этапа", statsFrom(t.events, t.cwd, t.skills, t.commands).attrs()...)
+	message, level := "этап завершён", slog.LevelInfo
+	attrs := []slog.Attr{slog.Duration("duration", (time.Duration(o.DurationMs) * time.Millisecond).Round(time.Second)),
+		slog.String("cost", FormatCost(o))}
 	if !o.OK {
-		detail := ""
-		if o.Result == nil {
-			code := "?"
-			if o.ExitCode != nil {
-				code = fmt.Sprint(*o.ExitCode)
-			}
-			if o.Signal != "" {
-				code += ", " + o.Signal
-			}
-			detail = " [exit " + code + "]"
+		message, level = "этап не выполнен", slog.LevelWarn
+		attrs = append(attrs, slog.String("reason", o.Reason))
+		if o.Result == nil && o.ExitCode != nil {
+			attrs = append(attrs, slog.Int("exit", *o.ExitCode))
 		}
-		outcome = "не выполнен (" + o.Reason + ")" + detail
+		if o.Result == nil && o.Signal != "" {
+			attrs = append(attrs, slog.String("signal", o.Signal))
+		}
+		attrs = append(attrs, slog.String("traffic", t.traffic.Describe()))
 	}
-	logx.Logf("этап «%s» %s: %sс, %s", t.name, outcome, seconds(o.DurationMs), FormatCost(o))
-	if !o.OK {
-		t.Logf("%s", t.traffic.Describe())
-	}
+	t.log.LogAttrs(context.Background(), level, message, attrs...)
 }
 
 // FormatCost — цена этапа. Токены, восстановленные из потока убитого этапа, —

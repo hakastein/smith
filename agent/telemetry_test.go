@@ -23,7 +23,7 @@ func closed(ch <-chan struct{}) bool {
 
 // Ответ модели открывает волну, а этап, так и не дошедший до ответа, не вешает ждущего.
 func TestRespondingOnStartOrEnd(t *testing.T) {
-	started := agent.NewTelemetry("started", nil, nil, t.TempDir(), discard{})
+	started := agent.NewTelemetry("started", nil, nil, t.TempDir(), discard{}, nil)
 	started.Accept(&agent.Event{Kind: "system", Note: "init"})
 	if closed(started.Responding()) {
 		t.Fatal("Responding закрыт до ответа модели")
@@ -34,7 +34,7 @@ func TestRespondingOnStartOrEnd(t *testing.T) {
 	}
 	started.Close()
 
-	silent := agent.NewTelemetry("silent", nil, nil, t.TempDir(), discard{})
+	silent := agent.NewTelemetry("silent", nil, nil, t.TempDir(), discard{}, nil)
 	silent.Close()
 	if !closed(silent.Responding()) {
 		t.Fatal("Responding не закрыт концом этапа без ответа")

@@ -40,7 +40,7 @@ func TestProcessCancellationIsLocalAndKillsDescendants(t *testing.T) {
 			dir := t.TempDir()
 			start := func(ctx context.Context, script string, timeout time.Duration) (<-chan struct{}, <-chan run) {
 				stream := &processStream{ready: make(chan struct{})}
-				telemetry := agent.NewTelemetry(name, nil, nil, dir, stream)
+				telemetry := agent.NewTelemetry(name, nil, nil, dir, stream, nil)
 				result := make(chan run, 1)
 				go func() {
 					p := agent.Start(ctx, agent.Command{Path: "/bin/sh", Argv: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin"},

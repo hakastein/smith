@@ -3,11 +3,13 @@ package codex
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,7 +20,6 @@ import (
 	"github.com/hakastein/smith/agent"
 	"github.com/hakastein/smith/drivers"
 	"github.com/hakastein/smith/internal/launch"
-	"github.com/hakastein/smith/logx"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -350,7 +351,7 @@ func New(settings drivers.Settings, setup drivers.Setup) (*Driver, error) {
 	if launch.Exists(auth) {
 		from = auth
 	}
-	logx.Logf("драйвер codex: %s, вход %s", settings.Bin, from)
+	cmp.Or(setup.Logger, slog.Default()).Info("драйвер готов", "driver", "codex", "bin", settings.Bin, "auth", from)
 	return &Driver{settings: settings, env: setup.Environ(settings, codexAuth),
 		runSkills: setup.RunSkills, tmp: setup.Tmp, auth: auth}, nil
 }
@@ -388,6 +389,15 @@ func (c *Driver) sandboxed(a drivers.Args) (agent.Command, error) {
 		"-c", "permissions.smith.network={enabled = true, dangerously_allow_all_unix_sockets = true}",
 		"-c", `approval_policy="never"`, "-c", "allow_login_shell=false", "-c", "project_doc_max_bytes=0",
 	}
+	// shortcut: текст идёт одним аргументом -c, а он в Linux не длиннее 128 КиБ; общий CODEX_HOME не даёт положить
+	// его в config.toml запуска — искать иной путь, если системный промпт строгого этапа упрётся в предел.
+	text, err := instructions(a)
+	if err != nil {
+		return agent.Command{}, err
+	}
+	if text != "" {
+		argv = append(argv, "-c", "developer_instructions="+quoteTOML(text))
+	}
 	if off := treeSkills(a.Cwd); len(off) > 0 {
 		var toggles []string
 		for _, path := range off {
@@ -406,6 +416,16 @@ func (c *Driver) sandboxed(a drivers.Args) (agent.Command, error) {
 		Dir: a.Cwd, Input: a.Prompt, Timeout: a.Timeout}, nil
 }
 
+// instructions — текст SystemPromptFile или пусто. Он идёт в developer_instructions: developer-сообщение поверх
+// базового промпта, и кэш префикса делится между запусками с одним файлом.
+func instructions(a drivers.Args) (string, error) {
+	if a.SystemPromptFile == "" {
+		return "", nil
+	}
+	text, err := os.ReadFile(a.SystemPromptFile)
+	return string(text), err
+}
+
 // codexHome — общий CODEX_HOME пользователя.
 func (c *Driver) codexHome() string { return filepath.Dir(c.auth) }
 
@@ -419,10 +439,10 @@ func (c *Driver) Run(ctx context.Context, a drivers.Args, t *agent.Telemetry) (*
 	model, effort := a.Model, a.Effort
 	var cmd agent.Command
 	var err error
-	if a.Sandbox != nil {
-		cmd, err = c.sandboxed(a)
-	} else {
+	if a.Sandbox.ReadOnlyCLI {
 		cmd, err = c.command(a)
+	} else {
+		cmd, err = c.sandboxed(a)
 	}
 	if err != nil {
 		return nil, err
@@ -432,7 +452,7 @@ func (c *Driver) Run(ctx context.Context, a drivers.Args, t *agent.Telemetry) (*
 	o := tally.Outcome(p.Wait(), model, effort)
 	// Журнал запуска вне песочницы — единственный в его CODEX_HOME; в общем CODEX_HOME он находится по id сессии.
 	codexHome, suffix := filepath.Join(c.home(a), ".codex"), ""
-	if a.Sandbox != nil {
+	if !a.Sandbox.ReadOnlyCLI {
 		codexHome, suffix = c.codexHome(), "-"+tally.SessionID+".jsonl"
 	}
 	records := sessionRecords(codexHome, suffix)
@@ -443,10 +463,10 @@ func (c *Driver) Run(ctx context.Context, a drivers.Args, t *agent.Telemetry) (*
 		o.Cost = cost
 	}
 	o.Limits = sessionLimits(records)
-	if a.Sandbox == nil && a.SessionDir != "" && tally.SessionID != "" {
+	if a.Sandbox.ReadOnlyCLI && a.SessionDir != "" && tally.SessionID != "" {
 		// Без журнала сессии запуск не хуже: сбой сохранения его не роняет.
 		if o.Resume, err = c.keepSession(a, tally.SessionID); err != nil {
-			t.Logf("журнал сессии не сохранён (%s)", err)
+			t.Logger().Warn("журнал сессии не сохранён", "err", err)
 		}
 	}
 	return o, nil
@@ -502,12 +522,9 @@ func (c *Driver) command(a drivers.Args) (agent.Command, error) {
 			Config []skillToggle `toml:"config,omitempty"`
 		} `toml:"skills,omitempty"`
 	}
-	if a.SystemPromptFile != "" {
-		text, err := os.ReadFile(a.SystemPromptFile)
-		if err != nil {
-			return agent.Command{}, err
-		}
-		config.DeveloperInstructions = string(text)
+	var err error
+	if config.DeveloperInstructions, err = instructions(a); err != nil {
+		return agent.Command{}, err
 	}
 	for _, path := range treeSkills(a.Cwd) {
 		config.Skills.Config = append(config.Skills.Config, skillToggle{Path: path})

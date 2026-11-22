@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -13,20 +14,6 @@ import (
 	"strings"
 	"syscall"
 )
-
-const (
-	grey   = "\x1b[90m"
-	cyan   = "\x1b[36m"
-	yellow = "\x1b[33m"
-	reset  = "\x1b[0m"
-)
-
-func paint(color, text string, colors bool) string {
-	if colors {
-		return color + text + reset
-	}
-	return text
-}
 
 // Shorten — текст в одну строку не длиннее limit символов.
 func Shorten(text string, limit int) string {
@@ -111,48 +98,63 @@ func describeCall(input map[string]any, cwd string) string {
 	return strings.Join(parts, " ")
 }
 
-// formatEvent — строка лога о событии потока; ok=false — показывать нечего.
-func formatEvent(e *Event, colors bool, cwd, agent string) (string, bool) {
-	prefix := ""
-	if agent != "" {
-		prefix = paint(grey, "["+agent+"] ", colors)
+// line — строка лога о событии потока: вид строки (атрибут event записи), текст и отказ — у ответа на вызов.
+type line struct {
+	kind, text string
+	failed     bool
+}
+
+func (l line) level() slog.Level {
+	if l.failed || l.kind == "failed" || l.kind == "stderr" || l.kind == "unparsed" {
+		return slog.LevelWarn
 	}
+	return slog.LevelInfo
+}
+
+func (l line) attrs() []slog.Attr {
+	attrs := []slog.Attr{slog.String("event", l.kind)}
+	if l.kind == "reply" {
+		attrs = append(attrs, slog.Bool("error", l.failed))
+	}
+	return attrs
+}
+
+// eventLines — строки лога о событии потока; пусто — показывать нечего. Вид строки: failed — ошибка драйвера,
+// session, note, stderr, unparsed — строка вывода не разобрана, call — вызов инструмента, text — текст модели,
+// thinking, reply — ответ инструмента на вызов.
+func eventLines(e *Event, cwd string) []line {
 	if e.Failed {
-		return prefix + paint(yellow, "ошибка от драйвера: "+Shorten(string(e.Raw), 1500), colors), true
+		return []line{{kind: "failed", text: "ошибка от драйвера: " + Shorten(string(e.Raw), 1500)}}
 	}
-	var lines []string
+	var lines []line
 	if e.Session != nil {
-		lines = append(lines, prefix+paint(grey, sessionLine(e.Session), colors))
+		lines = append(lines, line{kind: "session", text: sessionLine(e.Session)})
 	}
 	if e.Note != "" {
-		lines = append(lines, prefix+paint(grey, e.Note, colors))
+		lines = append(lines, line{kind: "note", text: e.Note})
 	}
 	if text := strings.TrimSpace(e.Stderr); text != "" {
-		lines = append(lines, prefix+paint(yellow, "stderr: "+text, colors))
+		lines = append(lines, line{kind: "stderr", text: "stderr: " + text})
 	}
 	if strings.TrimSpace(e.Unparsed) != "" {
-		lines = append(lines, prefix+paint(yellow, "вывод не разобран: "+Shorten(e.Unparsed, 500), colors))
+		lines = append(lines, line{kind: "unparsed", text: "вывод не разобран: " + Shorten(e.Unparsed, 500)})
 	}
 	if e.Turn != nil {
 		for _, b := range e.Turn.Blocks {
 			switch {
 			case b.Call != nil:
-				lines = append(lines, prefix+paint(cyan, "→ "+b.Call.Name+": "+describeCall(b.Call.Input, cwd), colors))
+				lines = append(lines, line{kind: "call", text: b.Call.Name + ": " + describeCall(b.Call.Input, cwd)})
 			case strings.TrimSpace(b.Text) != "":
-				lines = append(lines, prefix+strings.TrimSpace(b.Text))
+				lines = append(lines, line{kind: "text", text: strings.TrimSpace(b.Text)})
 			case strings.TrimSpace(b.Thinking) != "":
-				lines = append(lines, prefix+paint(grey, "размышление: "+Shorten(b.Thinking, 400), colors))
+				lines = append(lines, line{kind: "thinking", text: "размышление: " + Shorten(b.Thinking, 400)})
 			}
 		}
 	}
 	for _, r := range e.Replies {
-		mark := "←"
-		if r.IsError {
-			mark = paint(yellow, "← ошибка", colors)
-		}
-		lines = append(lines, prefix+mark+" "+Shorten(r.Text, 200))
+		lines = append(lines, line{kind: "reply", text: Shorten(r.Text, 200), failed: r.IsError})
 	}
-	return strings.Join(lines, "\n"), len(lines) > 0
+	return lines
 }
 
 // stats — статистика этапа по его событиям.
@@ -228,33 +230,16 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-func (s *stats) Lines() []string {
-	var lines []string
-	if len(s.callNames) == 0 {
-		lines = append(lines, "агент не вызвал ни одного инструмента")
-	} else {
-		names := slices.Clone(s.callNames)
-		sort.SliceStable(names, func(i, j int) bool { return s.calls[names[i]] > s.calls[names[j]] })
-		parts := make([]string, len(names))
-		for i, n := range names {
-			parts[i] = fmt.Sprintf("%s×%d", n, s.calls[n])
-		}
-		lines = append(lines, "инструменты: "+strings.Join(parts, ", "))
+// attrs — статистика атрибутами записи: вызовы инструментов по убыванию числа, отказы, скиллы, команды, ходы и
+// прочитанные файлы.
+func (s *stats) attrs() []slog.Attr {
+	names := slices.Clone(s.callNames)
+	sort.SliceStable(names, func(i, j int) bool { return s.calls[names[i]] > s.calls[names[j]] })
+	tools := make([]slog.Attr, len(names))
+	for i, n := range names {
+		tools[i] = slog.Int(n, s.calls[n])
 	}
-	if s.errors > 0 {
-		lines = append(lines, fmt.Sprintf("отказов: %d", s.errors))
-	}
-	if skills := sortedKeys(s.skills); len(skills) > 0 {
-		lines = append(lines, "скиллы: "+strings.Join(skills, ", "))
-	} else {
-		lines = append(lines, "скиллов у этапа нет")
-	}
-	lines = append(lines, "команды: "+strings.Join(s.commands, ", "), fmt.Sprintf("ходов: %d", len(s.messages)+s.looseTurns))
-	if files := sortedKeys(s.files); len(files) > 0 {
-		lines = append(lines, fmt.Sprintf("прочитано файлов: %d", len(files)))
-		for _, f := range files {
-			lines = append(lines, "  "+f)
-		}
-	}
-	return lines
+	return []slog.Attr{{Key: "tools", Value: slog.GroupValue(tools...)}, slog.Int("errors", s.errors),
+		slog.Any("skills", sortedKeys(s.skills)), slog.Any("commands", s.commands),
+		slog.Int("turns", len(s.messages)+s.looseTurns), slog.Any("files", sortedKeys(s.files))}
 }

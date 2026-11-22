@@ -27,11 +27,12 @@ d, err := codex.New(codex.Defaults, drivers.Setup{
 	EnvOrder: []string{"PATH", "HOME"},
 	StageBin: bin, // каталог команд агента: первым в PATH этапа
 	Tmp:      tmp, // временный каталог прогона: в нём драйвер готовит каталоги этапов
+	Logger:   logger, // *slog.Logger сервиса; nil — slog.Default()
 })
 
-t := agent.NewTelemetry("writer", nil, nil, dir, stream)
+t := agent.NewTelemetry("writer", nil, nil, dir, stream, logger)
 out, err := d.Run(ctx, drivers.Args{Name: "writer", Model: "gpt-6.1-terra", Effort: "low", Prompt: task, Cwd: dir,
-	Schema: "answer.schema.json", Sandbox: &drivers.Sandbox{Readable: []string{repo}}, Timeout: 10 * time.Minute}, t)
+	Schema: "answer.schema.json", Sandbox: drivers.Sandbox{Readable: []string{repo}}, Timeout: 10 * time.Minute}, t)
 if err != nil {
 	t.Close()
 	return err
@@ -49,13 +50,15 @@ answer := out.Result.Text
 окружению: бинарника или входа.
 
 `agent.Telemetry` пишет события этапа в `agent.Stream` сервиса (`Write` — событие в общей форме, `Raw` — строка
-вывода CLI как есть), ход этапа и итог — в лог (`logx`, stderr). `Outcome` — исход: `OK` и `Reason`, итог `Result`,
-события `Events`, `Usage` по моделям, `ContextTokens`, `Cost` (`nil` — цена неизвестна), лимиты подписки, команда
-продолжения сессии `Resume`, если задан `SessionDir`.
+вывода CLI как есть), а ход этапа, его события и итог — записями в `*slog.Logger` сервиса. Контекст — атрибутами:
+`stage` у записей этапа, `driver` у записей драйвера; строка события агента — запись с атрибутом `event` (вид строки:
+`session`, `note`, `call`, `text`, `thinking`, `reply` с `error`, `stderr`, `unparsed`, `failed`). `Outcome` — исход:
+`OK` и `Reason`, итог `Result`, события `Events`, `Usage` по моделям, `ContextTokens`, `Cost` (`nil` — цена
+неизвестна), лимиты подписки, команда продолжения сессии `Resume`, если задан `SessionDir`.
 
 Отмена `ctx` или таймаут этапа убивают всю группу процессов агента. Секреты окружения сервиса (`*_TOKEN`, `*_KEY`,
-`*_SECRET`, `*_PASSWORD`) вымарываются из лога и сохранённых сессий; `redact.Secrets` — для того, что сервис пишет
-сам.
+`*_SECRET`, `*_PASSWORD`) вымарываются из сохранённых сессий. В записях лога — текст модели и argv агента: обработчик
+лога сервиса вымарывает их `redact.Secrets`, как и то, что сервис пишет сам.
 
 ## Волна на прогретом кэше
 
@@ -65,11 +68,11 @@ answer := out.Result.Text
 
 ```go
 g, ctx := errgroup.WithContext(ctx)
-lead := agent.NewTelemetry(stages[0].Name, nil, nil, dir, streams[0])
+lead := agent.NewTelemetry(stages[0].Name, nil, nil, dir, streams[0], logger)
 g.Go(func() error { return run(ctx, stages[0], lead) })
 <-lead.Responding()
 for i, s := range stages[1:] {
-	g.Go(func() error { return run(ctx, s, agent.NewTelemetry(s.Name, nil, nil, dir, streams[i+1])) })
+	g.Go(func() error { return run(ctx, s, agent.NewTelemetry(s.Name, nil, nil, dir, streams[i+1], logger)) })
 }
 err := g.Wait()
 ```
@@ -86,9 +89,9 @@ sock, err := broker.Listen([]string{"notes post"}, func(ctx context.Context, c b
 	// c.Argv — ["notes", "post", ...], c.Cwd — каталог вызова
 	return broker.Reply{Stdout: "записано\n"}
 })
-defer sock.Close()
+defer sock.Close() // вызовы в работе получают 5 секунд, потом их контекст отменяется, а Close возвращает ошибку
 out, err := d.Run(ctx, drivers.Args{ /* … */ Allow: []string{"notes post"}, Socket: sock.Path,
-	Sandbox: &drivers.Sandbox{Readable: []string{bin, filepath.Dir(exe)}}}, t)
+	Sandbox: drivers.Sandbox{Readable: []string{bin, filepath.Dir(exe)}}}, t)
 ```
 
 Клиент — бинарь сервиса под именем команды в `StageBin` (ссылка или обёртка), который зовёт
@@ -99,9 +102,10 @@ out, err := d.Run(ctx, drivers.Args{ /* … */ Allow: []string{"notes post"}, So
 
 ## Песочница
 
-`drivers.Args.Sandbox` — строгая песочница: агент читает только рабочий каталог, `Readable` этапа и
-`Settings.Readable` драйвера, свои скиллы и каталог сокета; сети нет, Unix-сокеты открыты. Без `Sandbox` CLI работает
-в своём режиме только для чтения, а команды `allow` идут по его правилам.
+`drivers.Args.Sandbox` — песочница этапа; нулевое значение — строгая: агент читает только рабочий каталог,
+`Readable` этапа и `Settings.Readable` драйвера, свои скиллы и каталог сокета; сети нет, Unix-сокеты открыты.
+Ослабление — явное: `Sandbox{ReadOnlyCLI: true}` запускает CLI в его режиме только для чтения, где агент читает любой
+путь, а команды `allow` идут по правилам разрешений CLI вне его песочницы, с сетью.
 
 | | `claude` | `codex` |
 |---|---|---|

@@ -5,6 +5,7 @@ package drivers
 
 import (
 	"context"
+	"log/slog"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -84,6 +85,8 @@ type Setup struct {
 	StageBin  string   // каталог команд, которые агенту можно вызывать: встаёт первым в PATH
 	RunSkills string   // каталог скиллов прогона (skills.Library.Materialize) или пусто
 	Tmp       string   // временный каталог прогона: в нём драйвер готовит каталоги запусков
+	// Logger — лог драйвера; nil — slog.Default().
+	Logger *slog.Logger
 }
 
 // Args — один запуск агента.
@@ -104,8 +107,8 @@ type Args struct {
 	Cwd              string
 	// Schema — файл JSON Schema итогового ответа; пусто — ответ свободным текстом.
 	Schema string
-	// Sandbox — строгая песочница; nil — режим CLI только для чтения, где команды Allow разрешены.
-	Sandbox *Sandbox
+	// Sandbox — песочница запуска; нулевое значение — строгая.
+	Sandbox Sandbox
 	Timeout time.Duration
 	// SessionDir — куда сохранить журнал сессии для её продолжения; пусто — не сохранять.
 	SessionDir string
@@ -114,12 +117,17 @@ type Args struct {
 	Socket string
 }
 
-// Sandbox — строгая песочница: агент читает только рабочий каталог, скиллы
-// запуска, каталог сокета команд и Readable, сети нет, unix-сокеты открыты.
-type Sandbox struct{ Readable []string }
+// Sandbox — песочница запуска. Нулевое значение — строгая песочница: агент читает только рабочий каталог, скиллы
+// запуска, каталог сокета команд, Readable и Settings.Readable драйвера, сети нет, unix-сокеты открыты.
+type Sandbox struct {
+	Readable []string
+	// ReadOnlyCLI — ослабление: вместо строгой песочницы режим CLI только для чтения. Агент читает любой путь, а
+	// команды Allow исполняются по правилам разрешений CLI вне его песочницы, с сетью.
+	ReadOnlyCLI bool
+}
 
 // Paths — что открыто на чтение: рабочий каталог первым, Readable, скиллы запуска и каталог сокета команд.
-func (s *Sandbox) Paths(a Args, runSkills string) []string {
+func (s Sandbox) Paths(a Args, runSkills string) []string {
 	paths := append([]string{a.Cwd}, s.Readable...)
 	for _, name := range a.Skills {
 		paths = append(paths, filepath.Join(runSkills, "skills", name))

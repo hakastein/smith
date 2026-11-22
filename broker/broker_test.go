@@ -39,3 +39,29 @@ func TestListenRefusesCallsOutsideAllow(t *testing.T) {
 		t.Fatalf("обработчик получил %v", handled)
 	}
 }
+
+// Вызов, переживший срок Close, не остаётся работать: Close отменяет его контекст и сообщает об остановке ошибкой.
+func TestCloseCancelsCallsPastGrace(t *testing.T) {
+	calls := make(chan context.Context)
+	s, err := broker.Listen([]string{"wait"}, func(ctx context.Context, _ broker.Call) broker.Reply {
+		calls <- ctx
+		<-ctx.Done()
+		return broker.Reply{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = broker.Do(context.Background(), s.Path, broker.Call{Argv: []string{"wait"}, Cwd: t.TempDir()})
+	}()
+	call := <-calls
+	if err := s.Close(); err == nil {
+		t.Fatal("Close вернул nil, хотя вызов не завершился")
+	}
+	if call.Err() == nil {
+		t.Fatal("контекст вызова не отменён после Close")
+	}
+	<-done
+}
