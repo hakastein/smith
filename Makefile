@@ -1,0 +1,6 @@
+.PHONY: go
+
+go:
+	test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
+	CGO_ENABLED=0 go vet ./...
+	CGO_ENABLED=0 go test $(TESTFLAGS) ./...
