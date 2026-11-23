@@ -1,18 +1,35 @@
 # smith
 
-Go-фреймворк запуска headless-агентов. smith запускает один этап агента — Claude Code или Codex — в песочнице и
-отдаёт его исход в общей для драйверов форме: ответ, события потока, токены, размер контекста и цену. Порядок этапов,
-параллельность и предметная логика — обычный Go-код сервиса: ни конфигов этапов, ни движка сценариев в smith нет.
+Go-библиотека для запуска headless-агентов — Claude Code и Codex — над задачей из вашего сервиса.
 
-Раскладка пакетов и решения — [ADR 1](docs/adr/0001-packages-and-api.md).
+smith запускает CLI агента в песочнице, выдаёт ему ровно те скиллы и команды, которые нужны для задачи, и возвращает
+результат в одной форме для обоих CLI: ответ, события, токены, размер контекста и цену.
 
-## Требования
+## Возможности
 
-- Linux или macOS, Go 1.26.
-- `claude` или `codex` с выполненным входом.
-- Строгая песочница `claude` в Linux — `bubblewrap` и `socat`: без них этап не стартует.
+- **Изолированные скиллы и инструменты.** Каждый запуск видит только свои скиллы и свои команды. Личные настройки,
+  хуки, плагины и скиллы пользователя машины в запуск не попадают.
+- **Команды агента на Go.** Команда, которую вызывает агент, исполняется обработчиком в вашем сервисе: агент получает
+  её вывод, а секреты, сеть и доступ к API остаются на стороне сервиса.
+- **Песочница по умолчанию.** Агент читает только рабочий каталог и явно названные пути, сети у него нет.
+- **Один интерфейс для Claude Code и Codex.** Модель, усилие, задание, JSON Schema ответа и таймаут задаются одинаково;
+  драйвер переводит их во флаги своего CLI.
+- **Учёт расхода.** Токены по моделям, размер контекста, цена запуска и лимиты подписки.
+- **Управляемый жизненный цикл.** Отмена контекста или таймаут завершают всю группу процессов агента; события
+  запуска идут в ваш `*slog.Logger` и в ваш поток.
+- **Параллельные запуски на общем кэше промпта.** Можно дождаться, когда модель начала отвечать первому запуску, и
+  стартовать остальные на прогретом кэше.
 
-## Этап
+## Установка
+
+```bash
+go get github.com/hakastein/smith
+```
+
+Нужны Linux или macOS, Go 1.26 и `claude` или `codex` с выполненным входом. Песочнице Claude Code в Linux нужны
+`bubblewrap` и `socat`.
+
+## Быстрый старт
 
 ```go
 import (
@@ -25,102 +42,118 @@ codex := drivers.Get("codex")
 d, err := codex.New(codex.Defaults, drivers.Setup{
 	Env:      map[string]string{"PATH": os.Getenv("PATH"), "HOME": os.Getenv("HOME")},
 	EnvOrder: []string{"PATH", "HOME"},
-	StageBin: bin, // каталог команд агента: первым в PATH этапа
-	Tmp:      tmp, // временный каталог прогона: в нём драйвер готовит каталоги этапов
-	Logger:   logger, // *slog.Logger сервиса; nil — slog.Default()
+	Tmp:      tmp,    // здесь драйвер готовит каталоги запусков
+	Logger:   logger, // nil — slog.Default()
 })
 
-t := agent.NewTelemetry("writer", nil, nil, dir, stream, logger)
-out, err := d.Run(ctx, drivers.Args{Name: "writer", Model: "gpt-6.1-terra", Effort: "low", Prompt: task, Cwd: dir,
-	Schema: "answer.schema.json", Sandbox: drivers.Sandbox{Readable: []string{repo}}, Timeout: 10 * time.Minute}, t)
+t := agent.NewTelemetry("summary", nil, nil, dir, stream, logger)
+out, err := d.Run(ctx, drivers.Args{
+	Name:    "summary",
+	Model:   "gpt-6.1-terra",
+	Effort:  "low",
+	Prompt:  "Опиши изменения в этом репозитории для пользователей.",
+	Cwd:     repo,
+	Schema:  "answer.schema.json",
+	Timeout: 10 * time.Minute,
+}, t)
 if err != nil {
 	t.Close()
 	return err
 }
 t.Finish(out)
 if !out.OK {
-	return fmt.Errorf("этап сорван: %s", out.Reason) // auth, rate_limit, timeout, died, killed:<сигнал>, other
+	return fmt.Errorf("агент не справился: %s", out.Reason) // auth, rate_limit, timeout, died, killed:<сигнал>, other
 }
 answer := out.Result.Text
 ```
 
-`drivers.Args` — задание этапа: модель и усилие, задание (`Prompt`, в stdin CLI), рабочий каталог, скиллы, файл
-системного промпта (`SystemPromptFile`: у этапов с одним файлом общий префикс кэша), JSON Schema ответа, переменные
-сверх белого списка, таймаут, разрешённые команды и сокет команд. `drivers.Gaps` до запуска называет, чего не хватает
-окружению: бинарника или входа.
+`drivers.Gaps` до запуска сообщает, чего не хватает окружению: бинарника CLI или входа.
 
-`agent.Telemetry` пишет события этапа в `agent.Stream` сервиса (`Write` — событие в общей форме, `Raw` — строка
-вывода CLI как есть), а ход этапа, его события и итог — записями в `*slog.Logger` сервиса. Контекст — атрибутами:
-`stage` у записей этапа, `driver` у записей драйвера; строка события агента — запись с атрибутом `event` (вид строки:
-`session`, `note`, `call`, `text`, `thinking`, `reply` с `error`, `stderr`, `unparsed`, `failed`). `Outcome` — исход:
-`OK` и `Reason`, итог `Result`, события `Events`, `Usage` по моделям, `ContextTokens`, `Cost` (`nil` — цена
-неизвестна), лимиты подписки, команда продолжения сессии `Resume`, если задан `SessionDir`.
+`Outcome` содержит `OK` и `Reason`, ответ `Result`, события `Events`, расход `Usage` по моделям, `ContextTokens`,
+цену `Cost` (`nil`, если цена модели неизвестна) и команду `Resume` для продолжения сессии, если задан `SessionDir`.
 
-Отмена `ctx` или таймаут этапа убивают всю группу процессов агента. Секреты окружения сервиса (`*_TOKEN`, `*_KEY`,
-`*_SECRET`, `*_PASSWORD`) вымарываются из сохранённых сессий. В записях лога — текст модели и argv агента: обработчик
-лога сервиса вымарывает их `redact.Secrets`, как и то, что сервис пишет сам.
+## Скиллы
 
-## Волна на прогретом кэше
-
-Кэш промпта, записанный запросом, доступен соседним запросам с началом ответа модели. Этапы волны с общим префиксом
-задания стартуют после того, как первому начали отвечать: `Telemetry.Responding()` закрывается началом ответа или
-концом этапа, если до ответа он не дошёл.
+Скиллы собираются в библиотеку из встроенной файловой системы и каталогов на диске, и каждый запуск получает только
+перечисленные в `Args.Skills`:
 
 ```go
-g, ctx := errgroup.WithContext(ctx)
-lead := agent.NewTelemetry(stages[0].Name, nil, nil, dir, streams[0], logger)
-g.Go(func() error { return run(ctx, stages[0], lead) })
-<-lead.Responding()
-for i, s := range stages[1:] {
-	g.Go(func() error { return run(ctx, s, agent.NewTelemetry(s.Name, nil, nil, dir, streams[i+1], logger)) })
-}
-err := g.Wait()
+lib, err := skills.LoadLibrary(embedded, []string{"./skills"})
+runSkills, err := lib.Materialize(tmp, []string{"changelog", "glossary"})
+// drivers.Setup{RunSkills: runSkills, …}
+out, err := d.Run(ctx, drivers.Args{ /* … */ Skills: []string{"changelog"}}, t)
 ```
-
-`run` — `d.Run` и `Finish`/`Close` телеметрии, как выше.
 
 ## Команды агента
 
-Команда агента — Go-обработчик сервиса. В песочнице у агента только тонкий клиент: он передаёт argv и рабочий каталог
-по Unix-сокету этапа, сервис исполняет вызов и возвращает stdout, stderr и код выхода.
+Команда агента — обработчик в вашем сервисе. Агент вызывает её как обычную программу; в песочнице у него только
+тонкий клиент, который передаёт argv и рабочий каталог по Unix-сокету запуска и возвращает stdout, stderr и код
+выхода.
 
 ```go
 sock, err := broker.Listen([]string{"notes post"}, func(ctx context.Context, c broker.Call) broker.Reply {
 	// c.Argv — ["notes", "post", ...], c.Cwd — каталог вызова
 	return broker.Reply{Stdout: "записано\n"}
 })
-defer sock.Close() // вызовы в работе получают 5 секунд, потом их контекст отменяется, а Close возвращает ошибку
-out, err := d.Run(ctx, drivers.Args{ /* … */ Allow: []string{"notes post"}, Socket: sock.Path,
-	Sandbox: drivers.Sandbox{Readable: []string{bin, filepath.Dir(exe)}}}, t)
+defer sock.Close()
+
+out, err := d.Run(ctx, drivers.Args{ /* … */
+	Allow:   []string{"notes post"},
+	Socket:  sock.Path,
+	Sandbox: drivers.Sandbox{Readable: []string{bin, filepath.Dir(exe)}},
+}, t)
 ```
 
-Клиент — бинарь сервиса под именем команды в `StageBin` (ссылка или обёртка), который зовёт
-`broker.Main(os.Args[0], os.Args[1:], os.Stdout, os.Stderr)`; каталог `StageBin` и каталог бинаря открывают песочнице
-на чтение. Сокет лежит в своём временном каталоге, и строгая песочница открывает этот каталог только своему этапу.
-`allow` — префиксы из слов: драйвер разрешает их своими правилами, а вызов команды брокера вне них отклоняется кодом 2
-и до обработчика не доходит.
+Клиент — бинарь вашего сервиса под именем команды в каталоге `Setup.StageBin` (ссылка или обёртка), который вызывает
+`broker.Main(os.Args[0], os.Args[1:], os.Stdout, os.Stderr)`.
+
+`Allow` — префиксы команд из слов, например `git log` или `notes post`. Драйвер разрешает их правилами своего CLI;
+вызов команды брокера вне `Allow` отклоняется до обработчика. Сокет запуска лежит в собственном каталоге, и песочница
+открывает его только этому запуску. `Close` даёт вызовам в работе 5 секунд, затем отменяет их контекст.
 
 ## Песочница
 
-`drivers.Args.Sandbox` — песочница этапа; нулевое значение — строгая: агент читает только рабочий каталог,
-`Readable` этапа и `Settings.Readable` драйвера, свои скиллы и каталог сокета; сети нет, Unix-сокеты открыты.
-Ослабление — явное: `Sandbox{ReadOnlyCLI: true}` запускает CLI в его режиме только для чтения, где агент читает любой
-путь, а команды `allow` идут по правилам разрешений CLI вне его песочницы, с сетью.
+Нулевое значение `Args.Sandbox` — строгая песочница: агент читает рабочий каталог, `Sandbox.Readable`,
+`Settings.Readable` драйвера, свои скиллы и каталог своего сокета; сети нет.
 
-| | `claude` | `codex` |
+| | Claude Code | Codex |
 |---|---|---|
-| Файлы | Инструменты читают рабочий каталог и `--add-dir`; команды — в песочнице ОС: чтение закрыто, кроме путей этапа и `/usr`, `/bin`, `/lib`, `/lib64`, `/etc` | Профиль прав `permissions.smith`: `:root` закрыт, открыты `:minimal`, пути этапа и `HOME` этапа. Каталог установки codex — в `Settings.Readable`, иначе команды агента не запускаются |
-| Сеть | Без разрешённых доменов, команды вне песочницы запрещены | Прокси без разрешённых доменов, `web_search` выключен |
-| Вход и настройки | Свой `CLAUDE_CONFIG_DIR` с копией кредов: личные настройки, хуки и плагины в этап не попадают | Общий `CODEX_HOME` с `auth.json`: копия разорвала бы обновление токена. Его `config.toml` и правила этап не читает |
+| Файлы | Инструменты видят рабочий каталог и `--add-dir`; команды идут в песочнице ОС, где открыты только пути запуска и системные каталоги | Профиль прав `permissions.smith`: открыты минимальный набор системных путей, пути запуска и `HOME` запуска. Каталог установки codex нужно добавить в `Settings.Readable` |
+| Сеть | Закрыта, команды вне песочницы запрещены | Закрыта прокси без разрешённых доменов, `web_search` выключен |
+| Настройки | Свой `CLAUDE_CONFIG_DIR` с копией входа | Общий `CODEX_HOME` ради обновления токена; его `config.toml`, правила и скиллы запуск не читает. Личный `AGENTS.md` пока читается |
 
-Окружение этапа — белый список: `PATH`, `HOME`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `USER`, `SHELL`, `TERM`, прокси,
-сертификаты, переменные входа драйвера и `Settings.Env`.
+`Sandbox{ReadOnlyCLI: true}` ослабляет песочницу до режима CLI «только чтение»: агент читает любой путь, а команды из
+`Allow` выполняются по правилам разрешений CLI, с сетью.
+
+Окружение запуска собирается по белому списку (`PATH`, `HOME`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `USER`, `SHELL`,
+`TERM`, прокси, сертификаты, переменные входа CLI) плюс `Settings.Env` и `Args.Env`. Переменные вида `*_TOKEN`,
+`*_KEY`, `*_SECRET`, `*_PASSWORD` вымарываются из сохранённых сессий; для своего лога используйте `redact.Secrets`.
+
+## Параллельные запуски
+
+Кэш промпта, записанный одним запросом, становится доступен другим, когда модель начинает отвечать.
+`Telemetry.Responding()` закрывается в этот момент или по завершении запуска, если до ответа дело не дошло:
+
+```go
+g, ctx := errgroup.WithContext(ctx)
+first := agent.NewTelemetry(tasks[0].Name, nil, nil, dir, streams[0], logger)
+g.Go(func() error { return run(ctx, tasks[0], first) })
+<-first.Responding()
+for i, task := range tasks[1:] {
+	g.Go(func() error { return run(ctx, task, agent.NewTelemetry(task.Name, nil, nil, dir, streams[i+1], logger)) })
+}
+err := g.Wait()
+```
+
+Общий префикс дают одинаковые `SystemPromptFile` и начало `Prompt`.
 
 ## Разработка
 
 ```bash
-make go      # gofmt, go vet, тесты
+make go   # gofmt, go vet, тесты
 ```
+
+Устройство пакетов — [ADR 1](docs/adr/0001-packages-and-api.md).
 
 ## Лицензия
 
