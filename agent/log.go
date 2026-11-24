@@ -193,7 +193,7 @@ func statsFrom(events []*Event, cwd string, skills, commands []string) *stats {
 func (s *stats) add(e *Event) {
 	if e.Turn != nil {
 		switch {
-		case e.Parent != "": // ходы субагентов — не ходы этапа
+		case e.Parent != "": // ходы этапа считаются по ходам самого агента
 		case e.Turn.MessageID != "":
 			s.messages[e.Turn.MessageID] = true
 		default:

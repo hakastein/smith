@@ -37,8 +37,8 @@ const rulesFile = "smith.rules"
 const thinkingSummary = `model_reasoning_summary="detailed"`
 
 // disabled — возможности codex, которые открывали бы агенту что-то кроме команд в песочнице, и снимок
-// профиля оболочки: под /bin/sh пользователя он ломает каждую команду. Субагентов `--disable multi_agent`
-// не выключает — codex запускает их через multi_agent v2, — выключает agents.enabled (subagents).
+// профиля оболочки: под /bin/sh пользователя он ломает каждую команду. Субагентов выключает agents.enabled
+// (subagents): с `--disable multi_agent` codex запускает их через multi_agent v2.
 var disabled = []string{"shell_snapshot", "apps", "plugins", "remote_plugin", "image_generation", "browser_use", "browser_use_external",
 	"computer_use", "in_app_browser", "hooks", "tool_suggest", "skill_mcp_dependency_install", "goals"}
 
@@ -165,8 +165,8 @@ func sessionRecords(codexHome, thread string) []sessionRecord {
 var codexWindows = map[int64]string{300: "five_hour", 10080: "seven_day"}
 
 // sessionLimits — лимиты подписки из самой поздней записи `token_count` с `rate_limits`, в той же форме, что у
-// claude: окно названо по своей длине в минутах. Журналы субагентов идут после журнала агента целиком, поэтому
-// поздняя — по времени записи, а не по порядку.
+// claude: окно названо по своей длине в минутах. Журналы субагентов читаются после журнала агента целиком, поэтому
+// записи упорядочены по времени.
 func sessionLimits(records []sessionRecord) *agent.Limits {
 	records = slices.Clone(records)
 	slices.SortStableFunc(records, func(a, b sessionRecord) int { return strings.Compare(a.Timestamp, b.Timestamp) })
