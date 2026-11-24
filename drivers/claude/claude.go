@@ -229,6 +229,10 @@ func (c *Driver) command(a drivers.Args) (agent.Command, error) {
 		"--disallowedTools", strings.Join(disallowedTools, " "),
 	}
 	argv = append(argv, noMCP...)
+	if a.Thinking {
+		// Без флага API отдаёт блоки размышлений пустыми.
+		argv = append(argv, "--thinking-display", "summarized")
+	}
 	if plugin != "" {
 		argv = append(argv, "--plugin-dir", plugin)
 	}

@@ -33,6 +33,9 @@ var codexAuth = []string{"CODEX_API_KEY", "OPENAI_API_KEY"}
 
 const rulesFile = "smith.rules"
 
+// thinkingSummary включает сводку размышлений: без неё codex exec элементов reasoning не шлёт.
+const thinkingSummary = `model_reasoning_summary="detailed"`
+
 // disabled — возможности codex, которые открывали бы агенту что-то кроме команд в песочнице, и снимок
 // профиля оболочки: под /bin/sh пользователя он ломает каждую команду.
 var disabled = []string{"shell_snapshot", "apps", "plugins", "remote_plugin", "image_generation", "browser_use", "browser_use_external",
@@ -403,6 +406,9 @@ func (c *Driver) sandboxed(a drivers.Args) (agent.Command, error) {
 	}
 	// shortcut: текст идёт одним аргументом -c, а он в Linux не длиннее 128 КиБ; общий CODEX_HOME не даёт положить
 	// его в config.toml запуска — искать иной путь, если системный промпт строгого этапа упрётся в предел.
+	if a.Thinking {
+		argv = append(argv, "-c", thinkingSummary)
+	}
 	text, err := instructions(a)
 	if err != nil {
 		return agent.Command{}, err
@@ -557,6 +563,9 @@ func (c *Driver) command(a drivers.Args) (agent.Command, error) {
 		"-m", model, "-c", "model_reasoning_effort=" + quoteTOML(effort), "-c", `approval_policy="never"`}
 	if !a.ProjectInstructions {
 		argv = append(argv, "-c", "project_doc_max_bytes=0")
+	}
+	if a.Thinking {
+		argv = append(argv, "-c", thinkingSummary)
 	}
 	if a.Schema != "" {
 		argv = append(argv, "--output-schema", a.Schema)
