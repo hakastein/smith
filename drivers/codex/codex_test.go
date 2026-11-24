@@ -59,8 +59,8 @@ func start(t *testing.T, dir string, a drivers.Args, script string) (*agent.Outc
 	return d.Run(context.Background(), a, telemetry)
 }
 
-// Вход без кэша не включает прочитанные и записанные в кэш токены, рассуждение названо, расход — сумма ходов запуска,
-// а запись в кэш оплачивается один раз — по своей цене.
+// Расход запуска складывается из ходов. Из input_tokens вычитаются токены, прочитанные из кэша и записанные в него;
+// записанные стоят по цене записи в кэш.
 func TestUsageAndCost(t *testing.T) {
 	usage := `{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":300,"output_tokens":50,"reasoning_output_tokens":20}`
 	record := `{"type":"token_usage_record","payload":{"usage":` + usage + `}}`

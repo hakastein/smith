@@ -238,10 +238,8 @@ type codexEvent struct {
 	Message *string         `json:"message"`
 }
 
-// parser — события `codex exec --json` в общей форме; тип события — тип codex, у
-// события элемента — с типом элемента. Цены, usage отдельных запросов и лимитов
-// подписки в потоке нет — их после выхода Run берёт из журнала сессии. Строка не
-// JSON не разбирается: её покажет лог. Итог хода несёт usage всех ходов запуска.
+// parser переводит строки `codex exec --json` в события agent. Kind — тип события codex, у события элемента после
+// «/» добавлен тип элемента. turn.completed приносит расход одного хода, parser копит его по всему запуску.
 func parser(model string) func([]byte) ([]*agent.Event, error) {
 	lastMessage := ""
 	var u codexUsage

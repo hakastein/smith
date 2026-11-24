@@ -112,7 +112,7 @@ func TestProcessCancellationIsLocalAndKillsDescendants(t *testing.T) {
 	}
 }
 
-// Потомок, унаследовавший stderr, не держит этап после выхода процесса и не переживает его.
+// Wait возвращается сразу после выхода процесса, хотя фоновый потомок держит stderr, и убивает потомка.
 func TestDescendantNeitherHoldsNorOutlivesTheStage(t *testing.T) {
 	dir := t.TempDir()
 	telemetry := agent.NewTelemetry("stage", nil, nil, dir, &processStream{ready: make(chan struct{})}, nil)
