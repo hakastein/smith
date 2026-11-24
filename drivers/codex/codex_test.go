@@ -2,7 +2,9 @@ package codex_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -110,5 +112,72 @@ func TestStrictSystemPromptFile(t *testing.T) {
 		if _, err := run(t, drivers.Args{SystemPromptFile: file + ".missing", Sandbox: sandbox}); err == nil {
 			t.Errorf("%+v: запуск с отсутствующим файлом системного промпта не сорван", sandbox)
 		}
+	}
+}
+
+// Расход субагентов — из их журналов: субагент найден по записи о запуске в журнале агента, его запросы стоят по
+// модели его журнала. Контекст этапа — контекст самого агента; журнал чужой сессии в расход не входит.
+func TestSubagentUsage(t *testing.T) {
+	small := `{"input_tokens":1000,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0}`
+	large := `{"input_tokens":5000,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0}`
+	main := `{"type":"token_usage_record","payload":{"thread_id":"T","usage":` + small + `}}` + "\n" +
+		`{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","agent_thread_id":"C"}}}`
+	child := `{"type":"turn_context","payload":{"model":"gpt-6.1-terra"}}` + "\n" +
+		`{"type":"token_usage_record","payload":{"thread_id":"C","usage":` + large + `}}`
+	other := `{"type":"token_usage_record","payload":{"thread_id":"X","usage":` + large + `}}`
+	out, err := start(t, t.TempDir(), drivers.Args{Model: "gpt-6.2-sol", Subagents: true}, `mkdir -p "$CODEX_HOME/sessions"
+printf '%s\n' '`+main+`' > "$CODEX_HOME/sessions/rollout-1-T.jsonl"
+printf '%s\n' '`+child+`' > "$CODEX_HOME/sessions/rollout-2-C.jsonl"
+printf '%s\n' '`+other+`' > "$CODEX_HOME/sessions/rollout-3-X.jsonl"
+echo '{"type":"thread.started","thread_id":"T"}'
+echo '{"type":"turn.completed","usage":`+small+`}'
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]agent.Usage{"gpt-6.2-sol": {InputTokens: 1000, OutputTokens: 10}, "gpt-6.1-terra": {InputTokens: 5000, OutputTokens: 10}}
+	if !maps.Equal(out.Usage, want) {
+		t.Errorf("usage %+v, want %+v", out.Usage, want)
+	}
+	if out.Cost == nil || math.Abs(*out.Cost-(1000*2+10*10+5000*1+10*5)/1e6) > 1e-12 {
+		t.Errorf("cost %v", out.Cost)
+	}
+	if out.ContextTokens != 1000 {
+		t.Errorf("context %d, want 1000", out.ContextTokens)
+	}
+}
+
+// Субагенты выключены, пока запуск их не разрешил, в любой песочнице.
+func TestSubagentsOffByDefault(t *testing.T) {
+	for _, sandbox := range []drivers.Sandbox{{}, {ReadOnlyCLI: true}} {
+		for _, on := range []bool{false, true} {
+			argv, err := run(t, drivers.Args{Sandbox: sandbox, Subagents: on})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := fmt.Sprintf("agents.enabled=%t", on); !slices.Contains(argv, want) {
+				t.Errorf("%+v, Subagents=%t: нет %s в argv %q", sandbox, on, want, argv)
+			}
+		}
+	}
+}
+
+// Лимиты подписки — из самой поздней записи, даже когда она в журнале агента, а журнал субагента читается после.
+func TestLatestLimitsAcrossSubagents(t *testing.T) {
+	limits := func(at, reached string) string {
+		return `{"timestamp":"` + at + `","type":"event_msg","payload":{"type":"token_count","rate_limits":{"rate_limit_reached_type":"` + reached + `"}}}`
+	}
+	main := `{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","agent_thread_id":"C"}}}` + "\n" +
+		limits("2026-11-24T20:07:34.000Z", "primary")
+	out, err := start(t, t.TempDir(), drivers.Args{Subagents: true}, `mkdir -p "$CODEX_HOME/sessions"
+printf '%s\n' '`+main+`' > "$CODEX_HOME/sessions/rollout-1-T.jsonl"
+printf '%s\n' '`+limits("2026-11-24T20:07:30.000Z", "")+`' > "$CODEX_HOME/sessions/rollout-2-C.jsonl"
+echo '{"type":"thread.started","thread_id":"T"}'
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Limits == nil || out.Limits.Status == nil || *out.Limits.Status != "rejected" {
+		t.Errorf("limits %+v, want rejected", out.Limits)
 	}
 }

@@ -102,6 +102,7 @@ func describeCall(input map[string]any, cwd string) string {
 type line struct {
 	kind, text string
 	failed     bool
+	parent     string // Event.Parent: строка о субагенте
 }
 
 func (l line) level() slog.Level {
@@ -116,6 +117,9 @@ func (l line) attrs() []slog.Attr {
 	if l.kind == "reply" {
 		attrs = append(attrs, slog.Bool("error", l.failed))
 	}
+	if l.parent != "" {
+		attrs = append(attrs, slog.String("subagent", l.parent))
+	}
 	return attrs
 }
 
@@ -124,7 +128,7 @@ func (l line) attrs() []slog.Attr {
 // thinking, reply — ответ инструмента на вызов.
 func eventLines(e *Event, cwd string) []line {
 	if e.Failed {
-		return []line{{kind: "failed", text: "ошибка от драйвера: " + Shorten(string(e.Raw), 1500)}}
+		return []line{{kind: "failed", text: "ошибка от драйвера: " + Shorten(string(e.Raw), 1500), parent: e.Parent}}
 	}
 	var lines []line
 	if e.Session != nil {
@@ -153,6 +157,9 @@ func eventLines(e *Event, cwd string) []line {
 	}
 	for _, r := range e.Replies {
 		lines = append(lines, line{kind: "reply", text: Shorten(r.Text, 200), failed: r.IsError})
+	}
+	for i := range lines {
+		lines[i].parent = e.Parent
 	}
 	return lines
 }
@@ -185,9 +192,11 @@ func statsFrom(events []*Event, cwd string, skills, commands []string) *stats {
 
 func (s *stats) add(e *Event) {
 	if e.Turn != nil {
-		if e.Turn.MessageID != "" {
+		switch {
+		case e.Parent != "": // ходы субагентов — не ходы этапа
+		case e.Turn.MessageID != "":
 			s.messages[e.Turn.MessageID] = true
-		} else {
+		default:
 			s.looseTurns++
 		}
 		for _, b := range e.Turn.Blocks {

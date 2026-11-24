@@ -10,7 +10,9 @@ type Event struct {
 	// Kind — тип события у драйвера: его называет сообщение о молчании этапа.
 	Kind string `json:"kind"`
 	// Failed — драйвер пометил событие ошибкой: лог показывает его строку целиком.
-	Failed  bool     `json:"failed,omitempty"`
+	Failed bool `json:"failed,omitempty"`
+	// Parent — ID вызова, которым агент запустил субагента, чьё это событие; пусто — событие самого агента.
+	Parent  string   `json:"parent,omitempty"`
 	Session *Session `json:"session,omitempty"` // начало сессии
 	Note    string   `json:"note,omitempty"`    // служебное событие драйвера одной строкой
 	Stderr  string   `json:"stderr,omitempty"`  // вывод мимо потока: stderr процесса или ошибка драйвера

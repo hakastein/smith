@@ -13,6 +13,8 @@ type event struct {
 	Type       string `json:"type"`
 	Subtype    string `json:"subtype"`
 	SessionID  string `json:"session_id"`
+	Parent     string `json:"parent_tool_use_id"`
+	ToolUseID  string `json:"tool_use_id"` // у событий субагента task_*: вызов, которым он запущен
 	Model      string `json:"model"`
 	Tools      []any  `json:"tools"`
 	MCPServers []struct {
@@ -98,7 +100,7 @@ func parse(raw []byte) ([]*agent.Event, error) {
 			return nil, err
 		}
 	}
-	out := &agent.Event{Raw: raw, Kind: e.Type, Failed: strings.Contains(e.Subtype, "error") || e.marked() || m.marked()}
+	out := &agent.Event{Raw: raw, Kind: e.Type, Parent: e.Parent, Failed: strings.Contains(e.Subtype, "error") || e.marked() || m.marked()}
 	if e.Subtype != "" {
 		out.Kind += "/" + e.Subtype
 	}
@@ -110,6 +112,9 @@ func parse(raw []byte) ([]*agent.Event, error) {
 				out.Session.MCP = append(out.Session.MCP, s.Name+"="+s.Status)
 			}
 		} else {
+			if strings.HasPrefix(e.Subtype, "task_") {
+				out.Parent = e.ToolUseID
+			}
 			out.Note = systemNote(e, raw)
 		}
 	case "stream_event":
@@ -176,6 +181,11 @@ func systemNote(e event, raw []byte) string {
 	switch {
 	case e.Subtype == "status" && e.Status == "requesting":
 		return ""
+	// Ход субагента виден его событиями, запуск — вызовом Agent.
+	case e.Subtype == "task_started" || e.Subtype == "task_progress" || e.Subtype == "task_updated":
+		return ""
+	case e.Subtype == "task_notification":
+		return "субагент закончил: " + e.Status
 	case e.Subtype == "thinking_tokens":
 		return thinking
 	case e.Subtype == "status":
