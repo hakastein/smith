@@ -59,23 +59,25 @@ func start(t *testing.T, dir string, a drivers.Args, script string) (*agent.Outc
 	return d.Run(context.Background(), a, telemetry)
 }
 
-// Вход без кэша не включает прочитанные и записанные в кэш токены, рассуждение названо, а запись в кэш оплачивается
-// один раз — по своей цене.
+// Вход без кэша не включает прочитанные и записанные в кэш токены, рассуждение названо, расход — сумма ходов запуска,
+// а запись в кэш оплачивается один раз — по своей цене.
 func TestUsageAndCost(t *testing.T) {
 	usage := `{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":300,"output_tokens":50,"reasoning_output_tokens":20}`
+	record := `{"type":"token_usage_record","payload":{"usage":` + usage + `}}`
 	out, err := start(t, t.TempDir(), drivers.Args{Model: "gpt-6.2-sol"}, `mkdir -p "$CODEX_HOME/sessions"
-echo '{"type":"token_usage_record","payload":{"usage":`+usage+`}}' > "$CODEX_HOME/sessions/rollout-1-T.jsonl"
+printf '%s\n%s\n' '`+record+`' '`+record+`' > "$CODEX_HOME/sessions/rollout-1-T.jsonl"
 echo '{"type":"thread.started","thread_id":"T"}'
+echo '{"type":"turn.completed","usage":`+usage+`}'
 echo '{"type":"turn.completed","usage":`+usage+`}'
 `)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := agent.Usage{InputTokens: 100, OutputTokens: 50, CacheReadInputTokens: 600, CacheCreationInputTokens: 300, ReasoningOutputTokens: 20}
+	want := agent.Usage{InputTokens: 200, OutputTokens: 100, CacheReadInputTokens: 1200, CacheCreationInputTokens: 600, ReasoningOutputTokens: 40}
 	if got := out.Usage["gpt-6.2-sol"]; got != want {
 		t.Errorf("usage %+v, want %+v", got, want)
 	}
-	if out.Cost == nil || math.Abs(*out.Cost-(100*2+600*0.1+300*2.5+50*10)/1e6) > 1e-12 {
+	if out.Cost == nil || math.Abs(*out.Cost-2*(100*2+600*0.1+300*2.5+50*10)/1e6) > 1e-12 {
 		t.Errorf("cost %v", out.Cost)
 	}
 }

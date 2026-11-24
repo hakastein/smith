@@ -4,7 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -106,5 +109,34 @@ func TestProcessCancellationIsLocalAndKillsDescendants(t *testing.T) {
 				t.Fatalf("независимый запуск не вернул исход и строки: %+v", r)
 			}
 		})
+	}
+}
+
+// Потомок, унаследовавший stderr, не держит этап после выхода процесса и не переживает его.
+func TestDescendantNeitherHoldsNorOutlivesTheStage(t *testing.T) {
+	dir := t.TempDir()
+	telemetry := agent.NewTelemetry("stage", nil, nil, dir, &processStream{ready: make(chan struct{})}, nil)
+	defer telemetry.Close()
+	started := time.Now()
+	p := agent.Start(context.Background(), agent.Command{Path: "/bin/sh", Argv: []string{"-c", "sleep 30 >/dev/null & echo $! > pid; echo {}"},
+		Env: []string{"PATH=/usr/bin:/bin"}, Dir: dir}, telemetry)
+	for range p.Lines() {
+	}
+	p.Wait()
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("этап ждал потомка %s", elapsed)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(3 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("потомок пережил этап")
+		}
 	}
 }

@@ -241,9 +241,10 @@ type codexEvent struct {
 // parser — события `codex exec --json` в общей форме; тип события — тип codex, у
 // события элемента — с типом элемента. Цены, usage отдельных запросов и лимитов
 // подписки в потоке нет — их после выхода Run берёт из журнала сессии. Строка не
-// JSON не разбирается: её покажет лог.
+// JSON не разбирается: её покажет лог. Итог хода несёт usage всех ходов запуска.
 func parser(model string) func([]byte) ([]*agent.Event, error) {
 	lastMessage := ""
+	var u codexUsage
 	return func(raw []byte) ([]*agent.Event, error) {
 		if !json.Valid(raw) {
 			return nil, errors.New("строка не JSON")
@@ -272,7 +273,11 @@ func parser(model string) func([]byte) ([]*agent.Event, error) {
 			failed := item.ExitCode == nil || *item.ExitCode != 0
 			out.Replies = []agent.Reply{{CallID: item.ID, Text: item.AggregatedOutput, IsError: failed}}
 		case e.Type == "turn.completed":
-			u := e.Usage
+			u.InputTokens += e.Usage.InputTokens
+			u.CachedInputTokens += e.Usage.CachedInputTokens
+			u.CacheWriteInputTokens += e.Usage.CacheWriteInputTokens
+			u.OutputTokens += e.Usage.OutputTokens
+			u.ReasoningOutputTokens += e.Usage.ReasoningOutputTokens
 			out.Result = &agent.Result{Text: lastMessage, Usage: map[string]agent.Usage{model: {InputTokens: u.fresh(),
 				OutputTokens: u.OutputTokens, CacheReadInputTokens: u.CachedInputTokens, CacheCreationInputTokens: u.CacheWriteInputTokens,
 				ReasoningOutputTokens: u.ReasoningOutputTokens}}}
