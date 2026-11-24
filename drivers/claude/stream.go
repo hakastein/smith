@@ -146,7 +146,8 @@ func parse(raw []byte) ([]*agent.Event, error) {
 		if e.ModelUsage != nil {
 			out.Result.Usage = map[string]agent.Usage{}
 			for model, u := range e.ModelUsage {
-				out.Result.Usage[model] = agent.Usage(u)
+				out.Result.Usage[model] = agent.Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens,
+					CacheReadInputTokens: u.CacheReadInputTokens, CacheCreationInputTokens: u.CacheCreationInputTokens}
 			}
 		}
 	case "rate_limit_event":

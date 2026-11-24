@@ -94,7 +94,6 @@ type Process struct {
 	cmd       *exec.Cmd
 	t         *Telemetry
 	stdout    io.Reader // nil — процесс не запустился
-	stderr    sync.WaitGroup
 	startedAt time.Time
 }
 
@@ -119,7 +118,9 @@ func Start(ctx context.Context, c Command, t *Telemetry) *Process {
 	Group(p.cmd)
 	stdin, _ := p.cmd.StdinPipe()
 	stdout, _ := p.cmd.StdoutPipe()
-	stderr, _ := p.cmd.StderrPipe()
+	// Потомки наследуют stderr и держат пайп открытым после выхода процесса. Через Writer stderr копирует exec,
+	// и Wait ждёт копирование не дольше WaitDelay.
+	p.cmd.Stderr = stderrWriter{t}
 	if err == nil {
 		err = p.cmd.Start()
 	}
@@ -139,21 +140,15 @@ func Start(ctx context.Context, c Command, t *Telemetry) *Process {
 		traffic.promptSentMs = p.since()
 		traffic.mu.Unlock()
 	}()
-	p.stderr.Add(1)
-	go func() {
-		defer p.stderr.Done()
-		buf := make([]byte, 64*1024)
-		for {
-			n, err := stderr.Read(buf)
-			if n > 0 {
-				t.own("stage_stderr", strings.TrimRightFunc(string(buf[:n]), unicode.IsSpace))
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
 	return p
+}
+
+// stderrWriter пишет stderr процесса в телеметрию кусками, как их отдаёт exec.
+type stderrWriter struct{ t *Telemetry }
+
+func (w stderrWriter) Write(b []byte) (int, error) {
+	w.t.own("stage_stderr", strings.TrimRightFunc(string(b), unicode.IsSpace))
+	return len(b), nil
 }
 
 // Lines — непустые строки stdout без краевых пробелов; все строки как есть уходят в сырой
@@ -193,8 +188,9 @@ func (p *Process) Wait() Exit {
 	defer p.cancel()
 	var exit Exit
 	if p.stdout != nil {
-		p.stderr.Wait()
 		p.cmd.Wait() // исход — в ProcessState: код или сигнал
+		// Фоновые потомки остаются жить после выхода процесса.
+		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 		if status, ok := p.cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 			exit.Signal = unix.SignalName(status.Signal())
 		} else {

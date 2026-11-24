@@ -2,12 +2,14 @@ package agent
 
 import "encoding/json"
 
-// Usage — токены модели: вход без кэша, выход, чтение и запись кэша.
+// Usage — токены модели: вход без кэша, выход, чтение и запись кэша. ReasoningOutputTokens — часть OutputTokens,
+// ушедшая на рассуждение; 0 — у драйвера, чей CLI её не называет.
 type Usage struct {
 	InputTokens              int64 `json:"inputTokens"`
 	OutputTokens             int64 `json:"outputTokens"`
 	CacheReadInputTokens     int64 `json:"cacheReadInputTokens"`
 	CacheCreationInputTokens int64 `json:"cacheCreationInputTokens"`
+	ReasoningOutputTokens    int64 `json:"reasoningOutputTokens"`
 }
 
 // Window — окно лимита подписки: использовано в процентах, сброс — unix-секунды.
