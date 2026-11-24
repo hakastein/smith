@@ -92,7 +92,7 @@ func requestCost(model string, u codexUsage) (float64, bool) {
 // `--json`, — usage запросов, лимиты и запросы субагентов.
 type sessionRecord struct {
 	Type      string `json:"type"`
-	Timestamp string `json:"timestamp"` // RFC 3339 в UTC: строки сравниваются как время
+	Timestamp string `json:"timestamp"` // codex пишет UTC с миллисекундами и Z: строки сравниваются как время
 	Payload   struct {
 		Type      string `json:"type"`
 		SessionID string `json:"session_id"` // у session_meta — сессия агента, общая с его субагентами
