@@ -95,6 +95,9 @@ type Args struct {
 	Name   string
 	Model  string
 	Effort string
+	// Thinking — модель отдаёт сводку своих размышлений: она приходит в Block.Thinking событий хода. Без него
+	// размышлений в потоке нет.
+	Thinking bool
 	// ProjectInstructions — агент читает инструкции проекта (AGENTS.md, CLAUDE.md).
 	ProjectInstructions bool
 	Allow               []string // команды, которые агенту можно запускать: префиксы из слов, `git show`
