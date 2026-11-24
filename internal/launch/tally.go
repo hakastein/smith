@@ -60,6 +60,7 @@ func (y *Tally) add(e *agent.Event) {
 			y.usage.OutputTokens += u.OutputTokens
 			y.usage.CacheReadInputTokens += u.CacheReadInputTokens
 			y.usage.CacheCreationInputTokens += u.CacheCreationInputTokens
+			y.usage.ReasoningOutputTokens += u.ReasoningOutputTokens
 			y.contextTokens = max(y.contextTokens, u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens)
 		}
 	}

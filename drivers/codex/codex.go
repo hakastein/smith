@@ -46,17 +46,25 @@ type price struct{ input, cached, cacheWrite, output float64 }
 // Модели без цены здесь — `$?` в отчёте.
 var codexPrices = map[string]price{
 	"gpt-6.1-sol":   {2, 0.1, 2.5, 10},
+	"gpt-6.2-sol":   {2, 0.1, 2.5, 10},
 	"gpt-6.1-terra": {1, 0.05, 1.25, 5},
 }
 
 const longPrompt = 272_000
 
-// codexUsage — usage запроса или хода codex.
+// codexUsage — usage запроса или хода codex. В InputTokens входят прочитанные и записанные в кэш токены,
+// в OutputTokens — токены рассуждения.
 type codexUsage struct {
 	InputTokens           int64 `json:"input_tokens"`
 	CachedInputTokens     int64 `json:"cached_input_tokens"`
 	CacheWriteInputTokens int64 `json:"cache_write_input_tokens"`
 	OutputTokens          int64 `json:"output_tokens"`
+	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
+}
+
+// fresh — токены входа без кэша.
+func (u codexUsage) fresh() int64 {
+	return u.InputTokens - u.CachedInputTokens - u.CacheWriteInputTokens
 }
 
 // requestCost — цена одного запроса по его usage; ok=false — цены модели нет.
@@ -65,7 +73,7 @@ func requestCost(model string, u codexUsage) (float64, bool) {
 	if !ok {
 		return 0, false
 	}
-	input := float64(u.InputTokens-u.CachedInputTokens)*p.input + float64(u.CachedInputTokens)*p.cached + float64(u.CacheWriteInputTokens)*p.cacheWrite
+	input := float64(u.fresh())*p.input + float64(u.CachedInputTokens)*p.cached + float64(u.CacheWriteInputTokens)*p.cacheWrite
 	output := float64(u.OutputTokens) * p.output
 	if u.InputTokens > longPrompt {
 		return (input*2 + output*1.5) / 1e6, true
@@ -265,8 +273,9 @@ func parser(model string) func([]byte) ([]*agent.Event, error) {
 			out.Replies = []agent.Reply{{CallID: item.ID, Text: item.AggregatedOutput, IsError: failed}}
 		case e.Type == "turn.completed":
 			u := e.Usage
-			out.Result = &agent.Result{Text: lastMessage, Usage: map[string]agent.Usage{model: {InputTokens: u.InputTokens - u.CachedInputTokens,
-				OutputTokens: u.OutputTokens, CacheReadInputTokens: u.CachedInputTokens, CacheCreationInputTokens: u.CacheWriteInputTokens}}}
+			out.Result = &agent.Result{Text: lastMessage, Usage: map[string]agent.Usage{model: {InputTokens: u.fresh(),
+				OutputTokens: u.OutputTokens, CacheReadInputTokens: u.CachedInputTokens, CacheCreationInputTokens: u.CacheWriteInputTokens,
+				ReasoningOutputTokens: u.ReasoningOutputTokens}}}
 		case e.Type == "turn.failed":
 			var failure struct {
 				Message string `json:"message"`
