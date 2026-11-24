@@ -37,9 +37,13 @@ const rulesFile = "smith.rules"
 const thinkingSummary = `model_reasoning_summary="detailed"`
 
 // disabled — возможности codex, которые открывали бы агенту что-то кроме команд в песочнице, и снимок
-// профиля оболочки: под /bin/sh пользователя он ломает каждую команду.
+// профиля оболочки: под /bin/sh пользователя он ломает каждую команду. Субагентов выключает agents.enabled
+// (subagents): с `--disable multi_agent` codex запускает их через multi_agent v2.
 var disabled = []string{"shell_snapshot", "apps", "plugins", "remote_plugin", "image_generation", "browser_use", "browser_use_external",
-	"computer_use", "in_app_browser", "hooks", "multi_agent", "tool_suggest", "skill_mcp_dependency_install", "goals"}
+	"computer_use", "in_app_browser", "hooks", "tool_suggest", "skill_mcp_dependency_install", "goals"}
+
+// subagents — может ли агент запускать субагентов.
+func subagents(a drivers.Args) string { return fmt.Sprintf("agents.enabled=%t", a.Subagents) }
 
 type price struct{ input, cached, cacheWrite, output float64 }
 
@@ -85,11 +89,19 @@ func requestCost(model string, u codexUsage) (float64, bool) {
 }
 
 // sessionRecord — запись журнала сессии codex: в нём то, чего нет в потоке
-// `--json`, — usage запросов и лимиты.
+// `--json`, — usage запросов, лимиты и запросы субагентов.
 type sessionRecord struct {
-	Type    string `json:"type"`
-	Payload struct {
-		Type       string          `json:"type"`
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"` // codex пишет UTC с миллисекундами и Z: строки сравниваются как время
+	Payload   struct {
+		Type      string `json:"type"`
+		SessionID string `json:"session_id"` // у session_meta — сессия агента, общая с его субагентами
+		ThreadID  string `json:"thread_id"`  // у token_usage_record — агент или субагент запроса
+		Model     string `json:"model"`      // у turn_context — модель следующих запросов
+		Item      struct {
+			Type          string `json:"type"`
+			AgentThreadID string `json:"agent_thread_id"` // у SubAgentActivity — тред субагента
+		} `json:"item"`
 		Usage      json.RawMessage `json:"usage"`
 		RateLimits *struct {
 			Primary   *codexWindow `json:"primary"`
@@ -107,48 +119,57 @@ type codexWindow struct {
 
 var rolloutFile = regexp.MustCompile(`rollout-[^/]*\.jsonl$`)
 
-// sessionRecords — записи журналов сессии с концом имени suffix; строка не того вида пропускается.
-func sessionRecords(codexHome, suffix string) []sessionRecord {
-	var records []sessionRecord
-	sessions := filepath.Join(codexHome, "sessions")
+// sessionRecords — записи журналов запуска: агента thread и его субагентов. Журнал назван id треда, а
+// запуск субагента записан в журнале родителя событием SubAgentActivity. Строка не того вида пропускается.
+// shortcut: субагенты multi_agent v1 (receiver_thread_ids у CollabAgentToolCall) не находятся — искать и их,
+// если codex перестанет выбирать v2.
+func sessionRecords(codexHome, thread string) []sessionRecord {
+	var paths []string
 	// Каталога сессий нет — запуск не дошёл до запроса: записей нет.
-	filepath.WalkDir(sessions, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !rolloutFile.MatchString(path) || !strings.HasSuffix(path, suffix) {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		for _, line := range bytes.Split(data, []byte("\n")) {
-			var r sessionRecord
-			if json.Unmarshal(line, &r) == nil {
-				records = append(records, r)
-			}
+	filepath.WalkDir(filepath.Join(codexHome, "sessions"), func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && rolloutFile.MatchString(path) {
+			paths = append(paths, path)
 		}
 		return nil
 	})
-	return records
-}
-
-// sessionRequests — usage каждого запроса (`token_usage_record`): `--json`
-// отдаёт только сумму за ход, а размер контекста и надбавка за длинный промпт
-// считаются по запросам.
-func sessionRequests(records []sessionRecord) []json.RawMessage {
-	requests := []json.RawMessage{}
-	for _, r := range records {
-		if r.Type == "token_usage_record" && len(r.Payload.Usage) > 0 && string(r.Payload.Usage) != "null" {
-			requests = append(requests, r.Payload.Usage)
+	var records []sessionRecord
+	seen := map[string]bool{}
+	for queue := []string{thread}; len(queue) > 0; queue = queue[1:] {
+		id := queue[0]
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		i := slices.IndexFunc(paths, func(p string) bool { return strings.HasSuffix(p, "-"+id+".jsonl") })
+		if i < 0 {
+			continue
+		}
+		data, err := os.ReadFile(paths[i])
+		if err != nil {
+			continue
+		}
+		for _, line := range bytes.Split(data, []byte("\n")) {
+			var r sessionRecord
+			if json.Unmarshal(line, &r) != nil {
+				continue
+			}
+			records = append(records, r)
+			if item := r.Payload.Item; item.Type == "SubAgentActivity" {
+				queue = append(queue, item.AgentThreadID)
+			}
 		}
 	}
-	return requests
+	return records
 }
 
 var codexWindows = map[int64]string{300: "five_hour", 10080: "seven_day"}
 
-// sessionLimits — лимиты подписки из последней записи `token_count` с
-// `rate_limits`, в той же форме, что у claude: окно названо по своей длине в минутах.
+// sessionLimits — лимиты подписки из самой поздней записи `token_count` с `rate_limits`, в той же форме, что у
+// claude: окно названо по своей длине в минутах. Журналы субагентов читаются после журнала агента целиком, поэтому
+// записи упорядочены по времени.
 func sessionLimits(records []sessionRecord) *agent.Limits {
+	records = slices.Clone(records)
+	slices.SortStableFunc(records, func(a, b sessionRecord) int { return strings.Compare(a.Timestamp, b.Timestamp) })
 	for i := len(records) - 1; i >= 0; i-- {
 		limits := records[i].Payload.RateLimits
 		if records[i].Payload.Type != "token_count" || limits == nil {
@@ -177,27 +198,45 @@ func sessionLimits(records []sessionRecord) *agent.Limits {
 	return nil
 }
 
-// sessionTotals — пик контекста и цена запуска по его запросам; цена nil, если хоть один не оценить.
-func sessionTotals(model string, requests []json.RawMessage) (int64, *float64) {
+// sessionTotals — по запросам запуска (`token_usage_record`): usage каждого, токены по моделям, пик контекста
+// агента thread и цена; цена nil, если хоть один запрос не оценить. `--json` отдаёт только сумму ходов агента
+// без субагентов, а размер контекста и надбавка за длинный промпт считаются по запросам. Модель запроса —
+// из turn_context его журнала.
+func sessionTotals(model, thread string, records []sessionRecord) ([]json.RawMessage, map[string]agent.Usage, int64, *float64) {
+	requests, usage := []json.RawMessage{}, map[string]agent.Usage{}
 	var peak int64
-	total, known := 0.0, len(requests) > 0
-	for _, raw := range requests {
-		var u codexUsage
-		if json.Unmarshal(raw, &u) != nil {
-			known = false
-			continue
+	total, known, current := 0.0, true, model
+	for _, r := range records {
+		switch {
+		case r.Type == "session_meta":
+			current = model
+		case r.Type == "turn_context" && r.Payload.Model != "":
+			current = r.Payload.Model
+		case r.Type == "token_usage_record" && len(r.Payload.Usage) > 0 && string(r.Payload.Usage) != "null":
+			requests = append(requests, r.Payload.Usage)
+			var u codexUsage
+			if json.Unmarshal(r.Payload.Usage, &u) != nil {
+				known = false
+				continue
+			}
+			if r.Payload.ThreadID == thread || r.Payload.ThreadID == "" {
+				peak = max(peak, u.InputTokens)
+			}
+			c, ok := requestCost(current, u)
+			total, known = total+c, known && ok
+			sum := usage[current]
+			sum.InputTokens += u.fresh()
+			sum.OutputTokens += u.OutputTokens
+			sum.CacheReadInputTokens += u.CachedInputTokens
+			sum.CacheCreationInputTokens += u.CacheWriteInputTokens
+			sum.ReasoningOutputTokens += u.ReasoningOutputTokens
+			usage[current] = sum
 		}
-		peak = max(peak, u.InputTokens)
-		c, ok := requestCost(model, u)
-		if !ok {
-			known = false
-		}
-		total += c
 	}
-	if !known {
-		return peak, nil
+	if !known || len(requests) == 0 {
+		return requests, usage, peak, nil
 	}
-	return peak, &total
+	return requests, usage, peak, &total
 }
 
 func codexHomeOf(env map[string]string) string {
@@ -235,6 +274,11 @@ type codexEvent struct {
 		Text             string `json:"text"`
 		AggregatedOutput string `json:"aggregated_output"`
 		ExitCode         *int   `json:"exit_code"`
+		// У collab_tool_call: инструмент субагентов, задание и треды субагентов.
+		Tool      string   `json:"tool"`
+		Prompt    *string  `json:"prompt"`
+		Receivers []string `json:"receiver_thread_ids"`
+		Status    string   `json:"status"`
 	} `json:"item"`
 	Usage   codexUsage      `json:"usage"`
 	Error   json.RawMessage `json:"error"`
@@ -270,6 +314,17 @@ func parser(model string) func([]byte) ([]*agent.Event, error) {
 			out.Turn = &agent.Turn{Blocks: []agent.Block{{Text: item.Text}}}
 		case e.Type == "item.completed" && item.Type == "reasoning":
 			out.Turn = &agent.Turn{Blocks: []agent.Block{{Thinking: item.Text}}}
+		// shortcut: при multi_agent v2 codex не шлёт в поток ни запуск субагента, ни его события
+		// (openai/codex#34919): видны только wait и иные вызовы, расход — в журналах сессии. Разбирать
+		// журналы субагентов на ходу, если их работу нужно видеть в потоке.
+		case e.Type == "item.started" && item.Type == "collab_tool_call":
+			input := map[string]any{"receivers": item.Receivers}
+			if item.Prompt != nil {
+				input["prompt"] = *item.Prompt
+			}
+			out.Turn = &agent.Turn{Blocks: []agent.Block{{Call: &agent.Call{ID: item.ID, Name: item.Tool, Input: input}}}}
+		case e.Type == "item.completed" && item.Type == "collab_tool_call":
+			out.Replies = []agent.Reply{{CallID: item.ID, Text: item.Status, IsError: item.Status == "failed"}}
 		case e.Type == "item.completed" && item.Type == "command_execution":
 			failed := item.ExitCode == nil || *item.ExitCode != 0
 			out.Replies = []agent.Reply{{CallID: item.ID, Text: item.AggregatedOutput, IsError: failed}}
@@ -402,7 +457,7 @@ func (c *Driver) sandboxed(a drivers.Args) (agent.Command, error) {
 		"-c", `permissions.smith.extends=":read-only"`,
 		"-c", "permissions.smith.filesystem={" + strings.Join(readable, ", ") + "}",
 		"-c", "permissions.smith.network={enabled = true, dangerously_allow_all_unix_sockets = true}",
-		"-c", `approval_policy="never"`, "-c", "allow_login_shell=false", "-c", "project_doc_max_bytes=0",
+		"-c", `approval_policy="never"`, "-c", "allow_login_shell=false", "-c", "project_doc_max_bytes=0", "-c", subagents(a),
 	}
 	// shortcut: текст идёт одним аргументом -c, а он в Linux не длиннее 128 КиБ; общий CODEX_HOME не даёт положить
 	// его в config.toml запуска — искать иной путь, если системный промпт строгого этапа упрётся в предел.
@@ -468,17 +523,21 @@ func (c *Driver) Run(ctx context.Context, a drivers.Args, t *agent.Telemetry) (*
 	p := agent.Start(ctx, cmd, t)
 	tally := launch.Read(p, t, parser(model))
 	o := tally.Outcome(p.Wait(), model, effort)
-	// Журнал запуска вне песочницы — единственный в его CODEX_HOME; в общем CODEX_HOME он находится по id сессии.
-	codexHome, suffix := filepath.Join(c.home(a), ".codex"), ""
+	codexHome := filepath.Join(c.home(a), ".codex")
 	if !a.Sandbox.ReadOnlyCLI {
-		codexHome, suffix = c.codexHome(), "-"+tally.SessionID+".jsonl"
+		codexHome = c.codexHome()
 	}
-	records := sessionRecords(codexHome, suffix)
-	o.Requests = sessionRequests(records)
-	peak, cost := sessionTotals(model, o.Requests)
+	records := sessionRecords(codexHome, tally.SessionID)
+	var usage map[string]agent.Usage
+	var peak int64
+	var cost *float64
+	o.Requests, usage, peak, cost = sessionTotals(model, tally.SessionID, records)
 	o.ContextTokens = max(o.ContextTokens, peak)
 	if o.Result != nil { // запуск без итога стоит ноль, как у любого драйвера
 		o.Cost = cost
+		if len(o.Requests) > 0 {
+			o.Usage = usage
+		}
 	}
 	o.Limits = sessionLimits(records)
 	if a.Sandbox.ReadOnlyCLI && a.SessionDir != "" && tally.SessionID != "" {
@@ -560,7 +619,8 @@ func (c *Driver) command(a drivers.Args) (agent.Command, error) {
 		}
 	}
 	argv := []string{"exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check", "-c", "skills.bundled.enabled=false",
-		"-m", model, "-c", "model_reasoning_effort=" + quoteTOML(effort), "-c", `approval_policy="never"`}
+		"-m", model, "-c", "model_reasoning_effort=" + quoteTOML(effort), "-c", `approval_policy="never"`,
+		"-c", subagents(a)}
 	if !a.ProjectInstructions {
 		argv = append(argv, "-c", "project_doc_max_bytes=0")
 	}

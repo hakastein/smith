@@ -196,7 +196,12 @@ func (c *Driver) command(a drivers.Args) (agent.Command, error) {
 			return agent.Command{}, err
 		}
 	}
-	allowed := allowedTools
+	allowed, disallowed := allowedTools, disallowedTools
+	if a.Subagents {
+		// shortcut: субагенты из `.claude/agents` дерева и --add-dir запуску доступны — запрещать их по имени
+		// (`Agent(<name>)`), если запуску нужны только встроенные.
+		disallowed = slices.DeleteFunc(slices.Clone(disallowed), func(tool string) bool { return tool == "Agent" || tool == "Task" })
+	}
 	var addDirs []string
 	if !a.Sandbox.ReadOnlyCLI {
 		// Голые Read, Grep и Glob открыли бы чтение любого пути: без них Claude Code читает только
@@ -226,9 +231,13 @@ func (c *Driver) command(a drivers.Args) (agent.Command, error) {
 		"--model", a.Model,
 		"--effort", a.Effort,
 		"--allowedTools", strings.Join(append(slices.Clone(allowed), bashRules(a.Allow)...), " "),
-		"--disallowedTools", strings.Join(disallowedTools, " "),
+		"--disallowedTools", strings.Join(disallowed, " "),
 	}
 	argv = append(argv, noMCP...)
+	if a.Subagents {
+		// Без флага субагент шлёт в поток только вызовы инструментов и их ответы, без текста и размышлений.
+		argv = append(argv, "--forward-subagent-text")
+	}
 	if a.Thinking {
 		// Без флага API отдаёт блоки размышлений пустыми.
 		argv = append(argv, "--thinking-display", "summarized")

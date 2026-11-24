@@ -52,8 +52,11 @@ func (y *Tally) add(e *agent.Event) {
 	if e.RateLimit != nil {
 		y.rateLimit = e.RateLimit
 	}
-	if e.Turn != nil {
+	// Ходы и контекст — самого агента; токены — и его субагентов.
+	if e.Turn != nil && e.Parent == "" {
 		y.turns++
+	}
+	if e.Turn != nil {
 		if u := e.Turn.Usage; u != nil {
 			y.sawUsage = true
 			y.usage.InputTokens += u.InputTokens
@@ -61,7 +64,9 @@ func (y *Tally) add(e *agent.Event) {
 			y.usage.CacheReadInputTokens += u.CacheReadInputTokens
 			y.usage.CacheCreationInputTokens += u.CacheCreationInputTokens
 			y.usage.ReasoningOutputTokens += u.ReasoningOutputTokens
-			y.contextTokens = max(y.contextTokens, u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens)
+			if e.Parent == "" {
+				y.contextTokens = max(y.contextTokens, u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens)
+			}
 		}
 	}
 }

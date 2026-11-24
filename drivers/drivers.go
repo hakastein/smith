@@ -98,6 +98,9 @@ type Args struct {
 	// Thinking — модель отдаёт сводку своих размышлений: она приходит в Block.Thinking событий хода. Без него
 	// размышлений в потоке нет.
 	Thinking bool
+	// Subagents — агент может запускать субагентов. Расход субагентов входит в исход, а события, которые CLI
+	// выдаёт в поток, несут Event.Parent.
+	Subagents bool
 	// ProjectInstructions — агент читает инструкции проекта (AGENTS.md, CLAUDE.md).
 	ProjectInstructions bool
 	Allow               []string // команды, которые агенту можно запускать: префиксы из слов, `git show`
